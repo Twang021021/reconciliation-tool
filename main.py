@@ -11,6 +11,9 @@ import re
 from pathlib import Path
 
 import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
 
 # ---------------------------------------------------------------------------
 # Config
@@ -26,6 +29,7 @@ CONFIG = {
         "full_name": "name",
     },
     "output_dir": "output",
+    "output_excel_path": "output/reconciliation_report.xlsx",
 }
 
 
@@ -223,10 +227,134 @@ def write_outputs(results, output_dir):
     print(f"\nCSV reports written to: {output_dir}/")
 
 
+# ---------------------------------------------------------------------------
+# Excel report (formatted, multi-tab)
+# ---------------------------------------------------------------------------
+_HEADER_FILL = PatternFill(start_color="1F2937", end_color="1F2937", fill_type="solid")
+_HEADER_FONT = Font(color="FFFFFF", bold=True)
+_MISMATCH_FILL = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+_ONLY_A_FILL = PatternFill(start_color="FFEB9C", end_color="FFEB9C", fill_type="solid")
+_ONLY_B_FILL = PatternFill(start_color="BDD7EE", end_color="BDD7EE", fill_type="solid")
+_DUPLICATE_FILL = PatternFill(start_color="F8CBAD", end_color="F8CBAD", fill_type="solid")
+_THIN_SIDE = Side(style="thin", color="D9D9D9")
+_THIN_BORDER = Border(left=_THIN_SIDE, right=_THIN_SIDE, top=_THIN_SIDE, bottom=_THIN_SIDE)
+
+
+def _write_sheet(wb, title, df, row_fill=None, cell_fills=None):
+    """Write one DataFrame as a styled sheet.
+
+    row_fill highlights every data row (used for buckets where the whole row
+    needs attention, like duplicates or orphaned keys). cell_fills highlights
+    only specific columns by name (used for mismatches, to flag the two
+    differing values rather than the whole row).
+    """
+    ws = wb.create_sheet(title)
+    columns = list(df.columns)
+
+    if not columns:
+        ws.append(["(no rows)"])
+        return ws
+
+    ws.append(columns)
+    for cell in ws[1]:
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+        cell.alignment = Alignment(vertical="center")
+    ws.freeze_panes = "A2"
+
+    if df.empty:
+        ws.append(["(no rows)"] + [""] * (len(columns) - 1))
+    else:
+        for row in df.itertuples(index=False):
+            ws.append(list(row))
+
+        col_idx = {name: i + 1 for i, name in enumerate(columns)}
+        for r in range(2, ws.max_row + 1):
+            if row_fill:
+                for c in range(1, ws.max_column + 1):
+                    ws.cell(row=r, column=c).fill = row_fill
+            if cell_fills:
+                for col_name, fill in cell_fills.items():
+                    idx = col_idx.get(col_name)
+                    if idx:
+                        ws.cell(row=r, column=idx).fill = fill
+
+    for r in range(1, ws.max_row + 1):
+        for c in range(1, ws.max_column + 1):
+            ws.cell(row=r, column=c).border = _THIN_BORDER
+
+    for c in range(1, ws.max_column + 1):
+        letter = get_column_letter(c)
+        max_len = max(
+            (len(str(ws.cell(row=r, column=c).value)) for r in range(1, ws.max_row + 1)),
+            default=10,
+        )
+        ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 50)
+
+    return ws
+
+
+def _write_summary(wb, results, schema_notes):
+    ws = wb.create_sheet("Summary", 0)
+    ws.append(["Reconciliation Summary"])
+    ws["A1"].font = Font(size=14, bold=True)
+    ws.append([])
+
+    header_row = ws.max_row + 1
+    ws.append(["Bucket", "Count"])
+    for cell in ws[header_row]:
+        cell.font = _HEADER_FONT
+        cell.fill = _HEADER_FILL
+
+    for label, count in [
+        ("Clean matches", len(results["clean"])),
+        ("Field-level mismatches", len(results["mismatches"])),
+        ("Only in A", len(results["only_in_a"])),
+        ("Only in B", len(results["only_in_b"])),
+        ("Duplicate keys in A", len(results["duplicates_a"])),
+        ("Duplicate keys in B", len(results["duplicates_b"])),
+    ]:
+        ws.append([label, count])
+
+    if schema_notes["only_in_a_columns"] or schema_notes["only_in_b_columns"]:
+        ws.append([])
+        ws.append(["Schema notes (columns not compared)"])
+        ws.cell(row=ws.max_row, column=1).font = Font(bold=True)
+        if schema_notes["only_in_a_columns"]:
+            ws.append(["Columns only in file A", ", ".join(schema_notes["only_in_a_columns"])])
+        if schema_notes["only_in_b_columns"]:
+            ws.append(["Columns only in file B", ", ".join(schema_notes["only_in_b_columns"])])
+
+    ws.column_dimensions["A"].width = 30
+    ws.column_dimensions["B"].width = 45
+    return ws
+
+
+def write_excel_report(results, schema_notes, path):
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    _write_summary(wb, results, schema_notes)
+    _write_sheet(wb, "Clean", results["clean"])
+    _write_sheet(
+        wb, "Mismatches", results["mismatches"],
+        cell_fills={"value_a": _MISMATCH_FILL, "value_b": _MISMATCH_FILL},
+    )
+    _write_sheet(wb, "Only in A", results["only_in_a"], row_fill=_ONLY_A_FILL)
+    _write_sheet(wb, "Only in B", results["only_in_b"], row_fill=_ONLY_B_FILL)
+    _write_sheet(wb, "Duplicates A", results["duplicates_a"], row_fill=_DUPLICATE_FILL)
+    _write_sheet(wb, "Duplicates B", results["duplicates_b"], row_fill=_DUPLICATE_FILL)
+
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    wb.save(path)
+    print(f"Excel report written to: {path}")
+
+
 def main():
     results, schema_notes = reconcile(CONFIG)
     print_summary(results, schema_notes)
     write_outputs(results, CONFIG["output_dir"])
+    write_excel_report(results, schema_notes, CONFIG["output_excel_path"])
 
 
 if __name__ == "__main__":

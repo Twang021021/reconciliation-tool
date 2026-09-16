@@ -23,8 +23,8 @@ Field comparison is not naive string equality:
 
 ## Status
 
-Core comparison logic is implemented with plain CSV/console output for
-verification. A formatted, multi-tab Excel report is planned as a follow-up.
+Core comparison logic and a formatted, multi-tab Excel report are both
+implemented.
 
 ## Usage
 
@@ -39,8 +39,23 @@ Edit the `CONFIG` dict at the top of `main.py` to point at your own files,
 set the key column, numeric tolerance, and any column name mappings between
 the two files.
 
-Reports are written to `output/` as CSV files: `clean.csv`, `mismatches.csv`,
+## Output
+
+Plain CSV files are written to `output/`: `clean.csv`, `mismatches.csv`,
 `only_in_a.csv`, `only_in_b.csv`, `duplicates_a.csv`, `duplicates_b.csv`.
+
+A formatted Excel workbook is also written to
+`output/reconciliation_report.xlsx`, with one tab per bucket plus a Summary
+tab with bucket counts:
+
+- **Mismatches** — the differing `value_a`/`value_b` cells are highlighted.
+- **Only in A / Only in B** — orphaned rows are shaded to flag them for review.
+- **Duplicates A / Duplicates B** — duplicate-key rows are shaded to flag them
+  for manual reconciliation, since duplicates are excluded from the
+  automated pairing.
+- **Clean** — unstyled, since there's nothing to flag.
+
+All sheets have a bold header row and frozen top row for readability.
 
 ## Project structure
 
