@@ -1,0 +1,12 @@
+id,name,amount,region,notes
+1,John Smith,1000,US,ok
+2,Jane Doe,2500,US,shipped
+3,Acme Co,100000,US,pending
+4,Bob Lee,100,CA,approved
+5," Acme Corp ",500,US,reviewed
+6,Only In A,300,US,orphan row
+8,Dup Row One,111,US,dup
+8,Dup Row Two,222,US,dup
+9,Grace Kim,750,US,
+10,Henry Ford,900,ny,shipped on time
+11,Ivy Chen,99.995,US,rounding check
