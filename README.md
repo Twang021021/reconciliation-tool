@@ -24,7 +24,9 @@ Field comparison is not naive string equality:
 ## Status
 
 Core comparison logic, a formatted multi-tab Excel report, CLI flags, input
-validation, and an automated test suite are all implemented.
+validation, a desktop GUI, and an automated test suite are all implemented.
+Tested against synthetic files up to 1,000,000 rows per side (see
+[Performance](#performance)).
 
 ## Usage
 
@@ -33,6 +35,28 @@ python -m venv venv
 venv\Scripts\activate      # or `source venv/bin/activate` on macOS/Linux
 pip install -r requirements.txt
 python main.py
+```
+
+### Desktop GUI
+
+```bash
+python gui.py
+```
+
+A small window: pick File A and File B, set the key column / tolerance /
+column mapping, click **Run Reconciliation** to see bucket counts and
+mismatch details, then **Save CSV Reports...** or **Save Excel Report...** to
+write the output wherever you choose. Reconciliation runs on a background
+thread so the window stays responsive on large files. This is a thin layer
+over the same `reconcile()` / `write_outputs()` / `write_excel_report()`
+functions the CLI uses — no core logic is duplicated.
+
+### Installing as a command
+
+```bash
+pip install -e .
+recon --file-a before.csv --file-b after.csv --key-column id
+recon-gui
 ```
 
 By default this reads the `CONFIG` dict at the top of `main.py`, which points
@@ -88,17 +112,50 @@ tab with bucket counts:
   automated pairing.
 - **Clean** — unstyled, since there's nothing to flag.
 
-All sheets have a bold header row and frozen top row for readability.
+All sheets have a bold header row and frozen top row for readability. On very
+large buckets (see below), highlighting is capped at the first 10,000 rows
+for report-generation speed — every row is still written in full, just
+unstyled past that point, and the CSV output always has the complete data.
+
+## Performance
+
+The comparison itself (`reconcile()`) is fully vectorized — it compares
+whole columns at once rather than looping row by row in Python, which is
+what let it scale. The Excel writer avoids per-cell border styling (which,
+it turns out, is the slow part of openpyxl, not row count) and caps
+highlighting per sheet at 10,000 rows, since no one visually scans more rows
+than that in a spreadsheet anyway — the point of highlighting is to draw the
+eye to a manageable number of exceptions, not to color a six-figure dataset.
+Both changes are covered by the existing test suite passing unchanged, plus
+manual verification that output was byte-identical to the pre-optimization
+version on the sample dataset.
+
+Measured on synthetic data (Windows, single machine — not a formal
+benchmark, but representative):
+
+| Rows per file | `reconcile()` | Excel report | Total |
+|--------------:|--------------:|-------------:|------:|
+| 500,000       | ~15s          | ~32s         | ~47s  |
+| 1,000,000     | ~28s          | ~63s         | ~92s  |
+
+Memory is not chunked — both files load fully into memory via pandas, since
+the outer-join and duplicate-detection logic need the whole key space at
+once. This is fine well into the millions of rows on a normal machine; if
+you need to reconcile files too large to fit in memory, that would require a
+different (streaming/database-backed) architecture, which is out of scope
+here.
 
 ## Project structure
 
 ```
 reconciliation-tool/
 ├── main.py               # core reconciliation logic, CLI, Excel report
+├── gui.py                 # tkinter desktop GUI
 ├── sample_data/           # example file_a.csv / file_b.csv
 ├── tests/                 # pytest suite
 ├── requirements.txt       # runtime dependencies
 ├── requirements-dev.txt   # + pytest, for running tests
+├── pyproject.toml         # packaging (recon / recon-gui commands)
 ├── pytest.ini
 └── README.md
 ```

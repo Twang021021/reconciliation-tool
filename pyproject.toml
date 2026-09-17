@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reconciliation-tool"
+version = "0.1.0"
+description = "Reconcile two spreadsheets (CSV or XLSX) by a key column and flag every difference."
+requires-python = ">=3.9"
+dependencies = [
+    "pandas",
+    "openpyxl",
+]
+
+[project.scripts]
+recon = "main:main"
+recon-gui = "gui:main"
+
+[tool.setuptools]
+py-modules = ["main", "gui"]

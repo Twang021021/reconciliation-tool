@@ -172,37 +172,61 @@ def reconcile(config):
     only_in_b = _extract_side(merged[merged["_merge"] == "right_only"], "_b", df_b.columns, key)
     both = merged[merged["_merge"] == "both"]
 
-    clean_rows = []
-    mismatch_rows = []
+    key_vals = both.get(f"{key}_a", both.get(key))
 
-    for _, row in both.iterrows():
-        key_val = row.get(f"{key}_a", row.get(key))
-        mismatched_fields = []
-        for col in common_cols:
-            col_a, col_b = f"{col}_a", f"{col}_b"
-            val_a = row[col_a] if col_a in row else row[col]
-            val_b = row[col_b] if col_b in row else row[col]
-            if not values_equal(val_a, val_b, tolerance):
-                mismatched_fields.append((col, val_a, val_b))
+    # Compare column-by-column across the whole `both` frame at once, rather
+    # than looping row by row: Series.combine() still calls values_equal()
+    # once per cell, but skips the per-row Series construction that
+    # DataFrame.iterrows() does, which is what makes iterrows() slow at
+    # scale (multiple minutes on hundreds of thousands of rows).
+    equal_by_col = {}
+    for col in common_cols:
+        col_a, col_b = f"{col}_a", f"{col}_b"
+        series_a = both[col_a] if col_a in both else both[col]
+        series_b = both[col_b] if col_b in both else both[col]
+        equal_by_col[col] = series_a.combine(series_b, lambda a, b: values_equal(a, b, tolerance))
 
-        if mismatched_fields:
-            for col, val_a, val_b in mismatched_fields:
-                mismatch_rows.append({
-                    "key": key_val,
-                    "field": col,
-                    "value_a": val_a,
-                    "value_b": val_b,
-                })
-        else:
-            record = {"key": key_val}
-            for col in common_cols:
-                col_a = f"{col}_a"
-                record[col] = row[col_a] if col_a in row else row[col]
-            clean_rows.append(record)
+    if common_cols:
+        equal_df = pd.DataFrame(equal_by_col, index=both.index)
+        all_equal = equal_df.all(axis=1)
+    else:
+        all_equal = pd.Series(True, index=both.index)
+
+    clean_idx = both.index[all_equal]
+    clean_records = {"key": key_vals.loc[clean_idx].values}
+    for col in common_cols:
+        col_a = f"{col}_a"
+        clean_records[col] = (both[col_a] if col_a in both else both[col]).loc[clean_idx].values
+    clean_df = pd.DataFrame(clean_records)
+
+    mismatch_idx = both.index[~all_equal]
+    mismatch_parts = []
+    for col in common_cols:
+        col_a, col_b = f"{col}_a", f"{col}_b"
+        wrong_idx = mismatch_idx[~equal_by_col[col].loc[mismatch_idx]]
+        if len(wrong_idx) == 0:
+            continue
+        mismatch_parts.append(pd.DataFrame({
+            "key": key_vals.loc[wrong_idx].values,
+            "field": col,
+            "value_a": (both[col_a] if col_a in both else both[col]).loc[wrong_idx].values,
+            "value_b": (both[col_b] if col_b in both else both[col]).loc[wrong_idx].values,
+            "_row_order": wrong_idx,
+        }))
+
+    if mismatch_parts:
+        mismatch_df = (
+            pd.concat(mismatch_parts, ignore_index=True)
+            .sort_values(["_row_order", "field"])
+            .drop(columns="_row_order")
+            .reset_index(drop=True)
+        )
+    else:
+        mismatch_df = pd.DataFrame(columns=["key", "field", "value_a", "value_b"])
 
     results = {
-        "clean": pd.DataFrame(clean_rows),
-        "mismatches": pd.DataFrame(mismatch_rows),
+        "clean": clean_df,
+        "mismatches": mismatch_df,
         "only_in_a": only_in_a,
         "only_in_b": only_in_b,
         "duplicates_a": duplicates_a,
@@ -270,6 +294,19 @@ _DUPLICATE_FILL = PatternFill(start_color="F8CBAD", end_color="F8CBAD", fill_typ
 _THIN_SIDE = Side(style="thin", color="D9D9D9")
 _THIN_BORDER = Border(left=_THIN_SIDE, right=_THIN_SIDE, top=_THIN_SIDE, bottom=_THIN_SIDE)
 
+# openpyxl's per-cell style assignment (.fill, .border, ...) is slow enough
+# (roughly 1,000 cells/sec, regardless of which style attribute) that
+# styling every cell of a large sheet can dominate runtime. Header styling
+# is cheap (one row). Row/cell highlighting is capped at this many data
+# rows per sheet — past that, rows are still written in full, just
+# unstyled, since a human isn't going to visually scan hundreds of
+# thousands of highlighted rows in Excel anyway; the CSV output has the
+# complete data either way.
+_MAX_STYLED_ROWS = 10_000
+# Scanning every cell for column-width autosizing is comparatively cheap,
+# but still bounded here as a safety margin against pathological sheets.
+_MAX_AUTOSIZE_SCAN_ROWS = 2_000
+
 
 def _write_sheet(wb, title, df, row_fill=None, cell_fills=None):
     """Write one DataFrame as a styled sheet.
@@ -277,7 +314,8 @@ def _write_sheet(wb, title, df, row_fill=None, cell_fills=None):
     row_fill highlights every data row (used for buckets where the whole row
     needs attention, like duplicates or orphaned keys). cell_fills highlights
     only specific columns by name (used for mismatches, to flag the two
-    differing values rather than the whole row).
+    differing values rather than the whole row). Highlighting is capped at
+    _MAX_STYLED_ROWS for report-generation speed on large datasets.
     """
     ws = wb.create_sheet(title)
     columns = list(df.columns)
@@ -291,6 +329,7 @@ def _write_sheet(wb, title, df, row_fill=None, cell_fills=None):
         cell.font = _HEADER_FONT
         cell.fill = _HEADER_FILL
         cell.alignment = Alignment(vertical="center")
+        cell.border = _THIN_BORDER
     ws.freeze_panes = "A2"
 
     if df.empty:
@@ -300,7 +339,8 @@ def _write_sheet(wb, title, df, row_fill=None, cell_fills=None):
             ws.append(list(row))
 
         col_idx = {name: i + 1 for i, name in enumerate(columns)}
-        for r in range(2, ws.max_row + 1):
+        last_styled_row = min(len(df), _MAX_STYLED_ROWS) + 1
+        for r in range(2, last_styled_row + 1):
             if row_fill:
                 for c in range(1, ws.max_column + 1):
                     ws.cell(row=r, column=c).fill = row_fill
@@ -310,14 +350,18 @@ def _write_sheet(wb, title, df, row_fill=None, cell_fills=None):
                     if idx:
                         ws.cell(row=r, column=idx).fill = fill
 
-    for r in range(1, ws.max_row + 1):
-        for c in range(1, ws.max_column + 1):
-            ws.cell(row=r, column=c).border = _THIN_BORDER
+        if (row_fill or cell_fills) and len(df) > _MAX_STYLED_ROWS:
+            print(
+                f"  ({title}: {len(df):,} rows - highlighting applied to the first "
+                f"{_MAX_STYLED_ROWS:,} only, for report-generation speed. All rows "
+                f"are present in this sheet and in the CSV output.)"
+            )
 
+    scan_rows = min(ws.max_row, _MAX_AUTOSIZE_SCAN_ROWS)
     for c in range(1, ws.max_column + 1):
         letter = get_column_letter(c)
         max_len = max(
-            (len(str(ws.cell(row=r, column=c).value)) for r in range(1, ws.max_row + 1)),
+            (len(str(ws.cell(row=r, column=c).value)) for r in range(1, scan_rows + 1)),
             default=10,
         )
         ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 50)
