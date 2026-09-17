@@ -23,8 +23,8 @@ Field comparison is not naive string equality:
 
 ## Status
 
-Core comparison logic and a formatted, multi-tab Excel report are both
-implemented.
+Core comparison logic, a formatted multi-tab Excel report, CLI flags, input
+validation, and an automated test suite are all implemented.
 
 ## Usage
 
@@ -35,9 +35,42 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Edit the `CONFIG` dict at the top of `main.py` to point at your own files,
-set the key column, numeric tolerance, and any column name mappings between
-the two files.
+By default this reads the `CONFIG` dict at the top of `main.py`, which points
+at `sample_data/`. Edit that dict to change the defaults permanently, or
+override any of it per run with CLI flags:
+
+```bash
+python main.py \
+  --file-a path/to/before.csv \
+  --file-b path/to/after.xlsx \
+  --key-column id \
+  --tolerance 0.01 \
+  --column-mapping "full_name=name,amt=amount" \
+  --output-dir output \
+  --output-excel output/reconciliation_report.xlsx
+```
+
+Run `python main.py --help` for the full flag list. Any flag left unset falls
+back to `CONFIG`.
+
+### Input validation
+
+Bad input (a missing file, an empty file, or a `--key-column` that doesn't
+exist in one of the files) is reported as a one-line error message with a
+non-zero exit code, not a raw stack trace.
+
+## Testing
+
+```bash
+pip install -r requirements-dev.txt
+pytest
+```
+
+Tests cover the normalization/comparison helpers (`is_blank`,
+`try_parse_number`, `normalize_key`, `values_equal`) directly, and
+`reconcile()` end-to-end against small in-memory CSVs — clean matches,
+mismatches, only-in-A/B, duplicate-key exclusion, column mapping, numeric
+tolerance, and the three input-validation error paths.
 
 ## Output
 
@@ -61,8 +94,11 @@ All sheets have a bold header row and frozen top row for readability.
 
 ```
 reconciliation-tool/
-├── main.py           # core reconciliation logic
-├── sample_data/       # example file_a.csv / file_b.csv for testing
-├── requirements.txt
+├── main.py               # core reconciliation logic, CLI, Excel report
+├── sample_data/           # example file_a.csv / file_b.csv
+├── tests/                 # pytest suite
+├── requirements.txt       # runtime dependencies
+├── requirements-dev.txt   # + pytest, for running tests
+├── pytest.ini
 └── README.md
 ```

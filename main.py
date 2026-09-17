@@ -6,14 +6,21 @@ field-level mismatches, "only in A", and "only in B". Duplicate keys are
 flagged separately since they break the 1:1 pairing this tool relies on.
 """
 
+import argparse
 import os
 import re
+import sys
 from pathlib import Path
 
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+
+
+class ReconciliationError(Exception):
+    """A problem with the input files or config that the user needs to fix,
+    as opposed to an unexpected internal error."""
 
 # ---------------------------------------------------------------------------
 # Config
@@ -37,12 +44,26 @@ CONFIG = {
 # Loading
 # ---------------------------------------------------------------------------
 def load_file(path):
+    if not os.path.isfile(path):
+        raise ReconciliationError(f"File not found: {path}")
+
     ext = Path(path).suffix.lower()
-    if ext == ".csv":
-        return pd.read_csv(path, dtype=str, keep_default_na=False)
-    if ext in (".xlsx", ".xls"):
-        return pd.read_excel(path, dtype=str)
-    raise ValueError(f"Unsupported file type: {path}")
+    try:
+        if ext == ".csv":
+            df = pd.read_csv(path, dtype=str, keep_default_na=False)
+        elif ext in (".xlsx", ".xls"):
+            df = pd.read_excel(path, dtype=str)
+        else:
+            raise ReconciliationError(
+                f"Unsupported file type '{ext}': {path} (expected .csv, .xlsx, or .xls)"
+            )
+    except pd.errors.EmptyDataError:
+        raise ReconciliationError(f"File is empty: {path}")
+
+    if df.shape[1] == 0:
+        raise ReconciliationError(f"File has no columns: {path}")
+
+    return df
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +136,16 @@ def reconcile(config):
 
     key = config["key_column"]
     tolerance = config["numeric_tolerance"]
+
+    if key not in df_a.columns:
+        raise ReconciliationError(
+            f"Key column '{key}' not found in file A. Available columns: {list(df_a.columns)}"
+        )
+    if key not in df_b.columns:
+        raise ReconciliationError(
+            f"Key column '{key}' not found in file B (after applying column_mapping). "
+            f"Available columns: {list(df_b.columns)}"
+        )
 
     df_a["__key__"] = df_a[key].map(normalize_key)
     df_b["__key__"] = df_b[key].map(normalize_key)
@@ -350,11 +381,71 @@ def write_excel_report(results, schema_notes, path):
     print(f"Excel report written to: {path}")
 
 
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def parse_column_mapping(raw):
+    """Parse 'file_b_col=file_a_col,other_b=other_a' into a dict."""
+    mapping = {}
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            raise argparse.ArgumentTypeError(
+                f"Invalid --column-mapping entry '{pair}' (expected format: file_b_col=file_a_col)"
+            )
+        b_col, a_col = pair.split("=", 1)
+        mapping[b_col.strip()] = a_col.strip()
+    return mapping
+
+
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Reconcile two spreadsheets (CSV or XLSX) by a key column. "
+                     "Any flag left unset falls back to the CONFIG dict in main.py.",
+    )
+    parser.add_argument("--file-a", default=CONFIG["file_a"], help="Path to file A")
+    parser.add_argument("--file-b", default=CONFIG["file_b"], help="Path to file B")
+    parser.add_argument("--key-column", default=CONFIG["key_column"], help="Key column name")
+    parser.add_argument(
+        "--tolerance", type=float, default=CONFIG["numeric_tolerance"],
+        help="Numeric comparison tolerance",
+    )
+    parser.add_argument(
+        "--column-mapping", type=parse_column_mapping, default=None,
+        help="Comma-separated file_b_col=file_a_col pairs, e.g. 'full_name=name,amt=amount'",
+    )
+    parser.add_argument("--output-dir", default=CONFIG["output_dir"], help="Directory for CSV output")
+    parser.add_argument("--output-excel", default=CONFIG["output_excel_path"], help="Path for the Excel report")
+    return parser.parse_args(argv)
+
+
+def build_config(args):
+    config = dict(CONFIG)
+    config["file_a"] = args.file_a
+    config["file_b"] = args.file_b
+    config["key_column"] = args.key_column
+    config["numeric_tolerance"] = args.tolerance
+    config["output_dir"] = args.output_dir
+    config["output_excel_path"] = args.output_excel
+    if args.column_mapping is not None:
+        config["column_mapping"] = args.column_mapping
+    return config
+
+
 def main():
-    results, schema_notes = reconcile(CONFIG)
+    config = build_config(parse_args())
+
+    try:
+        results, schema_notes = reconcile(config)
+    except ReconciliationError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
     print_summary(results, schema_notes)
-    write_outputs(results, CONFIG["output_dir"])
-    write_excel_report(results, schema_notes, CONFIG["output_excel_path"])
+    write_outputs(results, config["output_dir"])
+    write_excel_report(results, schema_notes, config["output_excel_path"])
 
 
 if __name__ == "__main__":
